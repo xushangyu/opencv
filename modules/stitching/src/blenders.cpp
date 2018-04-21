@@ -478,7 +478,7 @@ void MultiBandBlender::feed(InputArray _img, InputArray mask, Point tl)
     {
         Rect rc(x_tl, y_tl, x_br - x_tl, y_br - y_tl);
 #ifdef HAVE_OPENCL
-        if ( !cv::ocl::useOpenCL() ||
+        if ( !cv::ocl::isOpenCLActivated() ||
              !ocl_MultiBandBlender_feed(src_pyr_laplace[i], weight_pyr_gauss[i],
                     dst_pyr_laplace_[i](rc), dst_band_weights_[i](rc)) )
 #endif
@@ -625,15 +625,9 @@ void normalizeUsingWeightMap(InputArray _weight, InputOutputArray _src)
 {
     Mat src;
     Mat weight;
-#ifdef HAVE_TEGRA_OPTIMIZATION
-    src = _src.getMat();
-    weight = _weight.getMat();
-    if(tegra::useTegra() && tegra::normalizeUsingWeightMap(weight, src))
-        return;
-#endif
 
 #ifdef HAVE_OPENCL
-    if ( !cv::ocl::useOpenCL() ||
+    if ( !cv::ocl::isOpenCLActivated() ||
             !ocl_normalizeUsingWeightMap(_weight, _src) )
 #endif
     {
@@ -697,12 +691,6 @@ void createWeightMap(InputArray mask, float sharpness, InputOutputArray weight)
 
 void createLaplacePyr(InputArray img, int num_levels, std::vector<UMat> &pyr)
 {
-#ifdef HAVE_TEGRA_OPTIMIZATION
-    cv::Mat imgMat = img.getMat();
-    if(tegra::useTegra() && tegra::createLaplacePyr(imgMat, num_levels, pyr))
-        return;
-#endif
-
     pyr.resize(num_levels + 1);
 
     if(img.depth() == CV_8U)

@@ -2084,16 +2084,11 @@ public:
 // succeed but return a nullptr pointer. By default, the list does not allow nullptr
 // pointers.
 
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4127) // constant expression
-#endif
-
 template <class T, bool NULLABLE = FALSE>
 class ComPtrList : public List<T*>
 {
 public:
-
+    typedef typename List<T*>::Node Node;
     typedef T* Ptr;
 
     void Clear()
@@ -2178,10 +2173,6 @@ protected:
         return hr;
     }
 };
-
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
 
 /* Be sure to declare webcam device capability in manifest
   For better media capture support, add the following snippet with correct module name to the project manifest

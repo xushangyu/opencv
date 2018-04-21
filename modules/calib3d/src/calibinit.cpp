@@ -431,7 +431,7 @@ int cvFindChessboardCorners( const void* arr, CvSize pattern_size,
 
     cv::Ptr<CvMemStorage> storage;
 
-    try
+    CV_TRY
     {
     int k = 0;
     const int min_dilations = 0;
@@ -617,11 +617,11 @@ int cvFindChessboardCorners( const void* arr, CvSize pattern_size,
                             cvTermCriteria(CV_TERMCRIT_EPS+CV_TERMCRIT_ITER, 15, 0.1));
     }
     }
-    catch(...)
+    CV_CATCH_ALL
     {
         cvFree(&quads);
         cvFree(&corners);
-        throw;
+        CV_RETHROW();
     }
     cvFree(&quads);
     cvFree(&corners);
@@ -1391,7 +1391,7 @@ icvCheckQuadGroup( CvCBQuad **quad_group, int quad_count,
         }
     }
 
-    // start with a corner that belongs to a quad with a signle neighbor.
+    // start with a corner that belongs to a quad with a single neighbor.
     // if we do not have such, start with a corner of a quad with two neighbors.
     if( !first )
         first = first2;
@@ -2094,21 +2094,13 @@ void cv::drawChessboardCorners( InputOutputArray _image, Size patternSize,
                              nelems, patternWasFound );
 }
 
-bool cv::findCirclesGrid( InputArray image, Size patternSize,
-                                   OutputArray centers, int flags,
-                                   const Ptr<FeatureDetector> &blobDetector,
-                                   CirclesGridFinderParameters parameters)
-{
-    CirclesGridFinderParameters2 parameters2;
-    *((CirclesGridFinderParameters*)&parameters2) = parameters;
-    return cv::findCirclesGrid2(image, patternSize, centers, flags, blobDetector, parameters2);
-}
-
-bool cv::findCirclesGrid2( InputArray _image, Size patternSize,
+bool cv::findCirclesGrid( InputArray _image, Size patternSize,
                           OutputArray _centers, int flags, const Ptr<FeatureDetector> &blobDetector,
-                          CirclesGridFinderParameters2 parameters)
+                          const CirclesGridFinderParameters& parameters_)
 {
     CV_INSTRUMENT_REGION()
+
+    CirclesGridFinderParameters parameters = parameters_; // parameters.gridType is amended below
 
     bool isAsymmetricGrid = (flags & CALIB_CB_ASYMMETRIC_GRID) ? true : false;
     bool isSymmetricGrid  = (flags & CALIB_CB_SYMMETRIC_GRID ) ? true : false;
@@ -2151,13 +2143,13 @@ bool cv::findCirclesGrid2( InputArray _image, Size patternSize,
       void* oldCbkData;
       ErrorCallback oldCbk = redirectError(quiet_error, 0, &oldCbkData);
 #endif
-      try
+      CV_TRY
       {
         isFound = boxFinder.findHoles();
       }
-      catch (const cv::Exception &)
+      CV_CATCH(Exception, e)
       {
-
+          CV_UNUSED(e);
       }
 #if BE_QUIET
       redirectError(oldCbk, oldCbkData);
@@ -2173,7 +2165,7 @@ bool cv::findCirclesGrid2( InputArray _image, Size patternSize,
         boxFinder.getAsymmetricHoles(centers);
         break;
           default:
-            CV_Error(CV_StsBadArg, "Unkown pattern type");
+            CV_Error(CV_StsBadArg, "Unknown pattern type");
         }
 
         if (i != 0)
@@ -2201,7 +2193,7 @@ bool cv::findCirclesGrid2( InputArray _image, Size patternSize,
 bool cv::findCirclesGrid( InputArray _image, Size patternSize,
                           OutputArray _centers, int flags, const Ptr<FeatureDetector> &blobDetector)
 {
-    return cv::findCirclesGrid2(_image, patternSize, _centers, flags, blobDetector, CirclesGridFinderParameters2());
+    return cv::findCirclesGrid(_image, patternSize, _centers, flags, blobDetector, CirclesGridFinderParameters());
 }
 
 /* End of file. */

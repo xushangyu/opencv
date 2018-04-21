@@ -42,8 +42,6 @@
 #include "../precomp.hpp"
 
 #ifdef HAVE_PROTOBUF
-#include "caffe.pb.h"
-
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -77,7 +75,7 @@ static cv::String toString(const T &v)
     return ss.str();
 }
 
-class CaffeImporter : public Importer
+class CaffeImporter
 {
     caffe::NetParameter net;
     caffe::NetParameter netBinary;
@@ -92,6 +90,17 @@ public:
 
         if (caffeModel && caffeModel[0])
             ReadNetParamsFromBinaryFileOrDie(caffeModel, &netBinary);
+    }
+
+    CaffeImporter(const char *dataProto, size_t lenProto,
+                  const char *dataModel, size_t lenModel)
+    {
+        CV_TRACE_FUNCTION();
+
+        ReadNetParamsFromTextBufferOrDie(dataProto, lenProto, &net);
+
+        if (dataModel != NULL && lenModel > 0)
+            ReadNetParamsFromBinaryBufferOrDie(dataModel, lenModel, &netBinary);
     }
 
     void addParam(const Message &msg, const FieldDescriptor *field, cv::dnn::LayerParams &params)
@@ -318,9 +327,35 @@ public:
 
             if (type == "Input")
             {
-                addedBlobs.push_back(BlobNote(name, 0, netInputs.size()));
-                netInputs.push_back(name);
+                for (int outNum = 0; outNum < layer.top_size(); outNum++)
+                {
+                    addOutput(layer, 0, outNum);
+                    addedBlobs.back().outNum = netInputs.size();
+                    netInputs.push_back(addedBlobs.back().name);
+                }
                 continue;
+            }
+            else if (type == "BatchNorm")
+            {
+                if (!layerParams.get<bool>("use_global_stats", true))
+                {
+                    CV_Assert(layer.bottom_size() == 1, layer.top_size() == 1);
+
+                    LayerParams mvnParams;
+                    mvnParams.set("eps", layerParams.get<float>("eps", 1e-5));
+                    std::string mvnName = name + "/mvn";
+
+                    int repetitions = layerCounter[mvnName]++;
+                    if (repetitions)
+                        mvnName += String("_") + toString(repetitions);
+
+                    int mvnId = dstNet.addLayer(mvnName, "MVN", mvnParams);
+                    addInput(layer.bottom(0), mvnId, 0, dstNet);
+                    addOutput(layer, mvnId, 0);
+                    net.mutable_layer(li)->set_bottom(0, layer.top(0));
+                    layerParams.blobs[0].setTo(0);  // mean
+                    layerParams.blobs[1].setTo(1);  // std
+                }
             }
 
             int id = dstNet.addLayer(name, type, layerParams);
@@ -377,24 +412,22 @@ public:
 
         dstNet.connect(addedBlobs[idx].layerId, addedBlobs[idx].outNum, layerId, inNum);
     }
-
-    ~CaffeImporter()
-    {
-
-    }
-
 };
 
-}
-
-Ptr<Importer> createCaffeImporter(const String &prototxt, const String &caffeModel)
-{
-    return Ptr<Importer>(new CaffeImporter(prototxt.c_str(), caffeModel.c_str()));
 }
 
 Net readNetFromCaffe(const String &prototxt, const String &caffeModel /*= String()*/)
 {
     CaffeImporter caffeImporter(prototxt.c_str(), caffeModel.c_str());
+    Net net;
+    caffeImporter.populateNet(net);
+    return net;
+}
+
+Net readNetFromCaffe(const char *bufferProto, size_t lenProto,
+                     const char *bufferModel, size_t lenModel)
+{
+    CaffeImporter caffeImporter(bufferProto, lenProto, bufferModel, lenModel);
     Net net;
     caffeImporter.populateNet(net);
     return net;

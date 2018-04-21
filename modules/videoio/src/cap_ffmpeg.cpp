@@ -124,8 +124,10 @@ private:
             if (m)
             {
                 wchar_t path[MAX_PATH];
-                size_t sz = GetModuleFileNameW(m, path, sizeof(path));
-                if (sz > 0 && ERROR_SUCCESS == GetLastError())
+                const size_t path_size = sizeof(path)/sizeof(*path);
+                size_t sz = GetModuleFileNameW(m, path, path_size);
+                /* Don't handle paths longer than MAX_PATH until that becomes a real issue */
+                if (sz > 0 && sz < path_size)
                 {
                     wchar_t* s = wcsrchr(path, L'\\');
                     if (s)
@@ -194,26 +196,26 @@ private:
 };
 
 
-class CvCapture_FFMPEG_proxy :
+class CvCapture_FFMPEG_proxy CV_FINAL :
     public CvCapture
 {
 public:
     CvCapture_FFMPEG_proxy() { ffmpegCapture = 0; }
     virtual ~CvCapture_FFMPEG_proxy() { close(); }
 
-    virtual double getProperty(int propId) const
+    virtual double getProperty(int propId) const CV_OVERRIDE
     {
         return ffmpegCapture ? icvGetCaptureProperty_FFMPEG_p(ffmpegCapture, propId) : 0;
     }
-    virtual bool setProperty(int propId, double value)
+    virtual bool setProperty(int propId, double value) CV_OVERRIDE
     {
         return ffmpegCapture ? icvSetCaptureProperty_FFMPEG_p(ffmpegCapture, propId, value)!=0 : false;
     }
-    virtual bool grabFrame()
+    virtual bool grabFrame() CV_OVERRIDE
     {
         return ffmpegCapture ? icvGrabFrame_FFMPEG_p(ffmpegCapture)!=0 : false;
     }
-    virtual IplImage* retrieveFrame(int)
+    virtual IplImage* retrieveFrame(int) CV_OVERRIDE
     {
         unsigned char* data = 0;
         int step=0, width=0, height=0, cn=0;
@@ -258,14 +260,14 @@ CvCapture* cvCreateFileCapture_FFMPEG_proxy(const char * filename)
     return 0;
 }
 
-class CvVideoWriter_FFMPEG_proxy :
+class CvVideoWriter_FFMPEG_proxy CV_FINAL :
     public CvVideoWriter
 {
 public:
     CvVideoWriter_FFMPEG_proxy() { ffmpegWriter = 0; }
     virtual ~CvVideoWriter_FFMPEG_proxy() { close(); }
 
-    virtual bool writeFrame( const IplImage* image )
+    virtual bool writeFrame( const IplImage* image ) CV_OVERRIDE
     {
         if(!ffmpegWriter)
             return false;

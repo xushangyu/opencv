@@ -41,11 +41,10 @@
 
 #include "../../precomp.hpp"
 #include <vector>
-#include "common.hpp"
-#include "ocl4dnn.hpp"
+#include "../include/common.hpp"
+#include "../include/ocl4dnn.hpp"
 #include "opencl_kernels_dnn.hpp"
 
-#ifdef HAVE_OPENCL
 namespace cv { namespace dnn { namespace ocl4dnn {
 template<typename Dtype>
 OCL4DNNSoftmax<Dtype>::OCL4DNNSoftmax(OCL4DNNSoftmaxConfig config)
@@ -83,7 +82,6 @@ template<typename Dtype>
 bool OCL4DNNSoftmax<Dtype>::Forward(const UMat& bottom, UMat& top)
 {
     bool ret = false;
-    ocl::Queue queue = ocl::Queue::getDefault();
     bool intel_subgroup = ocl::Device::getDefault().intelSubgroupsSupport();
     if (intel_subgroup && inner_num_ < 128)
     {
@@ -131,7 +129,5 @@ bool OCL4DNNSoftmax<Dtype>::Forward(const UMat& bottom, UMat& top)
 }
 
 template class OCL4DNNSoftmax<float>;
-} // namespace ocl4dnn
-}
-}
-#endif // HAVE_OPENCL
+
+}}} // namespace cv::dnn::ocl4dnn

@@ -47,15 +47,12 @@
 #include <iostream>
 #include <fstream>
 
-#if defined(ENABLE_TORCH_IMPORTER) && ENABLE_TORCH_IMPORTER
 #include "THDiskFile.h"
-#endif
 
 namespace cv {
 namespace dnn {
 CV__DNN_EXPERIMENTAL_NS_BEGIN
 
-#if defined(ENABLE_TORCH_IMPORTER) && ENABLE_TORCH_IMPORTER
 using namespace TH;
 
 //#ifdef NDEBUG
@@ -95,7 +92,7 @@ static inline bool endsWith(const String &str, const char *substr)
     return str.rfind(substr) == str.length() - strlen(substr);
 }
 
-struct TorchImporter : public ::cv::dnn::Importer
+struct TorchImporter
 {
     typedef std::map<String, std::pair<int, Mat> > TensorsMap;
     Net net;
@@ -104,6 +101,8 @@ struct TorchImporter : public ::cv::dnn::Importer
     std::set<int> readedIndexes;
     std::map<int, Mat> storages;
     std::map<int, Mat> tensors;
+    // Stack with numbers of unconnected layers per scope (Sequential, ConcatTable etc.)
+    std::vector<int> numUnconnectedLayers;
 
     struct Module
     {
@@ -492,15 +491,7 @@ struct TorchImporter : public ::cv::dnn::Importer
                     layerParams.set("inputDimension", scalarParams.get<int>("inputDimension"));
                     layerParams.set("outputDimension", scalarParams.get<int>("outputDimension"));
                 }
-                if (nnName == "Concat")
-                {
-                    layerParams.set("dimension", scalarParams.get<int>("dimension"));
-                }
-                if (nnName == "JoinTable")
-                {
-                    layerParams.set("dimension", scalarParams.get<int>("dimension"));
-                }
-                if (nnName == "DepthConcat")
+                else if (nnName == "Concat" || nnName == "JoinTable" || nnName == "DepthConcat")
                 {
                     layerParams.set("dimension", scalarParams.get<int>("dimension"));
                 }
@@ -562,7 +553,11 @@ struct TorchImporter : public ::cv::dnn::Importer
                     layerParams.set("indices_blob_id", tensorParams["indices"].first);
                 }
                 if (nnName == "SpatialAveragePooling")
+                {
                     layerParams.set("pool", "AVE");
+                    layerParams.set("ave_pool_padded_area", scalarParams.has("count_include_pad") &&
+                                                            scalarParams.get<bool>("count_include_pad"));
+                }
                 convertTorchKernelsParams(scalarParams, layerParams);
 
                 CV_Assert(scalarParams.has("ceil_mode"));
@@ -617,7 +612,8 @@ struct TorchImporter : public ::cv::dnn::Importer
                 curModule->modules.push_back(cv::Ptr<Module>(new Module(nnName, "Sigmoid")));
                 readObject();
             }
-            else if (nnName == "SpatialBatchNormalization" || nnName == "InstanceNormalization")
+            else if (nnName == "SpatialBatchNormalization" || nnName == "InstanceNormalization" ||
+                     nnName == "BatchNormalization")
             {
                 newModule->apiType = "BatchNorm";
                 readTorchTable(scalarParams, tensorParams);
@@ -700,17 +696,24 @@ struct TorchImporter : public ::cv::dnn::Importer
 
                 curModule->modules.push_back(newModule);
             }
-            else if (nnName == "SpatialDropout")
+            else if (nnName == "SpatialDropout" || nnName == "Dropout")
             {
                 readTorchTable(scalarParams, tensorParams);
                 CV_Assert(scalarParams.has("p"));
 
-                float scale = 1 -  scalarParams.get<double>("p");
+                if (scalarParams.has("v2") && scalarParams.get<bool>("v2"))
+                {
+                    newModule->apiType = "Identity";
+                }
+                else
+                {
+                    float scale = 1 -  scalarParams.get<double>("p");
 
-                CV_Assert(scale > 0);
+                    CV_Assert(scale > 0);
 
-                newModule->apiType = "Power";
-                layerParams.set("scale", scale);
+                    newModule->apiType = "Power";
+                    layerParams.set("scale", scale);
+                }
                 curModule->modules.push_back(newModule);
             }
             // TotalVariation layer is from fast-neural-style project: https://github.com/jcjohnson/fast-neural-style
@@ -1087,6 +1090,7 @@ struct TorchImporter : public ::cv::dnn::Importer
                 {
                     newId = fill(module->modules[i], addedModules, prevLayerId, prevOutNum);
                 }
+                numUnconnectedLayers.push_back(module->modules.size());
                 return newId;
             }
             else if (module->thName == "JoinTable") {
@@ -1099,9 +1103,14 @@ struct TorchImporter : public ::cv::dnn::Importer
                 mergeId = net.addLayer(generateLayerName("torchMerge"), "Concat", mergeParams);
                 addedModules.push_back(std::make_pair(mergeId, module));
 
-                for (int i = 0; i < ids.size(); i++)
+                // Connect to the last number of unconnected layers.
+                CV_Assert(!numUnconnectedLayers.empty());
+                const int numInputs = numUnconnectedLayers.back();
+                numUnconnectedLayers.pop_back();
+                CV_Assert(numInputs <= ids.size());
+                for (int i = 0; i < numInputs; i++)
                 {
-                    net.connect(ids[i], 0, mergeId, i);
+                    net.connect(ids[ids.size() - numInputs + i], 0, mergeId, i);
                 }
 
                 return mergeId;
@@ -1115,9 +1124,14 @@ struct TorchImporter : public ::cv::dnn::Importer
 
                 int id = net.addLayer(name, "Eltwise", params);
 
-                for (int i = 0; i < ids.size(); i++)
+                // Connect to the last number of unconnected layers.
+                CV_Assert(!numUnconnectedLayers.empty());
+                const int numInputs = numUnconnectedLayers.back();
+                numUnconnectedLayers.pop_back();
+                CV_Assert(numInputs <= ids.size());
+                for (int i = 0; i < numInputs; i++)
                 {
-                    net.connect(ids[i], 0, id, i);
+                    net.connect(ids[ids.size() - numInputs + i], 0, id, i);
                 }
 
                 addedModules.push_back(std::make_pair(id, module));
@@ -1183,36 +1197,14 @@ struct TorchImporter : public ::cv::dnn::Importer
     }
 };
 
-Ptr<Importer> createTorchImporter(const String &filename, bool isBinary)
-{
-    return Ptr<Importer>(new TorchImporter(filename, isBinary));
-}
-
-
 Mat readTorchBlob(const String &filename, bool isBinary)
 {
-    Ptr<TorchImporter> importer(new TorchImporter(filename, isBinary));
-    importer->readObject();
-    CV_Assert(importer->tensors.size() == 1);
+    TorchImporter importer(filename, isBinary);
+    importer.readObject();
+    CV_Assert(importer.tensors.size() == 1);
 
-    return importer->tensors.begin()->second;
+    return importer.tensors.begin()->second;
 }
-
-#else
-
-Ptr<Importer> createTorchImporter(const String&, bool)
-{
-    CV_Error(Error::StsNotImplemented, "Torch importer is disabled in current build");
-    return Ptr<Importer>();
-}
-
-Mat readTorchBlob(const String&, bool)
-{
-    CV_Error(Error::StsNotImplemented, "Torch importer is disabled in current build");
-    return Mat();
-}
-
-#endif //defined(ENABLE_TORCH_IMPORTER) && ENABLE_TORCH_IMPORTER
 
 Net readNetFromTorch(const String &model, bool isBinary)
 {

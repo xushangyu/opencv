@@ -42,12 +42,14 @@
 
 #include "../precomp.hpp"
 #include "layers_common.hpp"
-#include "op_halide.hpp"
-#include "opencl_kernels_dnn.hpp"
+#include "../op_halide.hpp"
+#include "../op_inf_engine.hpp"
 #include <algorithm>
 #include <stdlib.h>
 using std::max;
+
 #ifdef HAVE_OPENCL
+#include "opencl_kernels_dnn.hpp"
 using namespace cv::dnn::ocl4dnn;
 #endif
 
@@ -56,14 +58,14 @@ namespace cv
 namespace dnn
 {
 
-class SoftMaxLayerImpl : public SoftmaxLayer
+class SoftMaxLayerImpl CV_FINAL : public SoftmaxLayer
 {
 public:
 
     SoftMaxLayerImpl(const LayerParams& params)
     {
         axisRaw = params.get<int>("axis", 1);
-        logSoftMax = params.get<int>("log_softmax", false);
+        logSoftMax = params.get<bool>("log_softmax", false);
         setParamsFrom(params);
     }
 
@@ -74,7 +76,7 @@ public:
     bool getMemoryShapes(const std::vector<MatShape> &inputs,
                          const int requiredOutputs,
                          std::vector<MatShape> &outputs,
-                         std::vector<MatShape> &internals) const
+                         std::vector<MatShape> &internals) const CV_OVERRIDE
     {
         bool inplace = Layer::getMemoryShapes(inputs, requiredOutputs, outputs, internals);
         MatShape shape = inputs[0];
@@ -84,42 +86,55 @@ public:
         return inplace;
     }
 
-    virtual bool supportBackend(int backendId)
+    virtual bool supportBackend(int backendId) CV_OVERRIDE
     {
         return backendId == DNN_BACKEND_DEFAULT ||
-               backendId == DNN_BACKEND_HALIDE && haveHalide() && axisRaw == 1;
+               backendId == DNN_BACKEND_HALIDE && haveHalide() && axisRaw == 1 ||
+               backendId == DNN_BACKEND_INFERENCE_ENGINE && haveInfEngine() && !logSoftMax;
     }
 
 #ifdef HAVE_OPENCL
-    bool forward_ocl(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals)
+    virtual void finalize(const std::vector<Mat*> &inputs, std::vector<Mat> &outputs) CV_OVERRIDE
     {
+        softmaxOp.release();
+    }
+
+    bool forward_ocl(InputArrayOfArrays inps, OutputArrayOfArrays outs, OutputArrayOfArrays itns)
+    {
+        std::vector<UMat> inputs;
+        std::vector<UMat> outputs;
+        std::vector<UMat> internals;
+
+        inps.getUMatVector(inputs);
+        outs.getUMatVector(outputs);
+        itns.getUMatVector(internals);
+
         if (softmaxOp.empty())
         {
             OCL4DNNSoftmaxConfig config;
 
-            config.in_shape = shape(*inputs[0]);
+            config.in_shape = shape(inputs[0]);
             config.axis = axisRaw;
-            config.channels = inputs[0]->size[axisRaw];
+            config.channels = inputs[0].size[axisRaw];
             config.logsoftmax = logSoftMax;
 
             softmaxOp = Ptr<OCL4DNNSoftmax<float> >(new OCL4DNNSoftmax<float>(config));
         }
 
-        UMat srcMat, dstMat;
-        srcMat = inputs[0]->getUMat(ACCESS_READ);
-        dstMat = outputs[0].getUMat(ACCESS_WRITE);
+        UMat& src = inputs[0];
+        UMat& dstMat = outputs[0];
 
-        if (softmaxOp->Forward(srcMat, dstMat))
+        if (softmaxOp->Forward(src, dstMat))
             return true;
 
-        const Mat &src = *inputs[0];
-        UMat bufMat = internals[0].getUMat(ACCESS_WRITE);
-        srcMat.copyTo(dstMat);
+        UMat& bufMat = internals[0];
+        src.copyTo(dstMat);
 
         int axis = clamp(axisRaw, src.dims);
-        size_t outerSize = src.total(0, axis);
+        MatShape s = shape(src);
+        size_t outerSize = total(s, 0, axis);
         size_t channels = src.size[axis];
-        size_t innerSize = src.total(axis + 1);
+        size_t innerSize = total(s, axis + 1);
 
         String buildOpts = String("-DT=") + ocl::typeToStr(src.type());
         ocl::Kernel kmax, ksub, ksum, kdiv;
@@ -141,40 +156,56 @@ public:
         size_t bufSize = internals[0].total();
         size_t totalSize = src.total();
 
+        // adjust local/global size
+        size_t internal_localSize[1] = { (bufSize == 1) ? 1 : wgSize };
+        size_t internal_globalSize[1] = { divUp(bufSize, (unsigned int)internal_localSize[0]) * internal_localSize[0] };
+
+        // adjust local/global size (total)
+        size_t total_localSize[1] = { (totalSize == 1) ? 1 : wgSize };
+        size_t total_globalSize[1] = { divUp(totalSize, (unsigned int)total_localSize[0]) * total_localSize[0] };
+
         kmax.args((int)outerSize, (int)channels, (int)innerSize,
                   ocl::KernelArg::PtrReadOnly(dstMat), ocl::KernelArg::PtrReadWrite(bufMat));
-        if (!kmax.run(1, &bufSize, &wgSize, false))
+        if (!kmax.run(1, internal_globalSize, internal_localSize, false))
             return false;
 
         ksub.args((int)totalSize, (int)outerSize, (int)channels, (int)innerSize,
                   ocl::KernelArg::PtrReadOnly(bufMat), ocl::KernelArg::PtrReadWrite(dstMat));
-        if (!ksub.run(1, &totalSize, &wgSize, false))
+        if (!ksub.run(1, total_globalSize, total_localSize, false))
             return false;
 
         cv::exp(dstMat, dstMat);
 
         ksum.args((int)outerSize, (int)channels, (int)innerSize,
                   ocl::KernelArg::PtrReadOnly(dstMat), ocl::KernelArg::PtrReadWrite(bufMat));
-        if (!ksum.run(1, &bufSize, &wgSize, false))
+        if (!ksum.run(1, internal_globalSize, internal_localSize, false))
             return false;
 
         kdiv.args((int)totalSize, (int)outerSize, (int)channels, (int)innerSize,
                   ocl::KernelArg::PtrReadOnly(bufMat), ocl::KernelArg::PtrReadWrite(dstMat));
-        if (!kdiv.run(1, &totalSize, &wgSize, false))
+        if (!kdiv.run(1, total_globalSize, total_localSize, false))
             return false;
 
         return true;
     }
 #endif
 
-    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals)
+    void forward(InputArrayOfArrays inputs_arr, OutputArrayOfArrays outputs_arr, OutputArrayOfArrays internals_arr) CV_OVERRIDE
     {
         CV_TRACE_FUNCTION();
         CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
         CV_OCL_RUN((preferableTarget == DNN_TARGET_OPENCL) &&
                    OCL_PERFORMANCE_CHECK(ocl::Device::getDefault().isIntel()),
-                   forward_ocl(inputs, outputs, internals))
+                   forward_ocl(inputs_arr, outputs_arr, internals_arr))
+
+        Layer::forward_fallback(inputs_arr, outputs_arr, internals_arr);
+    }
+
+    void forward(std::vector<Mat*> &inputs, std::vector<Mat> &outputs, std::vector<Mat> &internals) CV_OVERRIDE
+    {
+        CV_TRACE_FUNCTION();
+        CV_TRACE_ARG_VALUE(name, "name", name.c_str());
 
         const Mat &src = *inputs[0];
         Mat &dst = outputs[0];
@@ -259,7 +290,7 @@ public:
         }
     }
 
-    virtual Ptr<BackendNode> initHalide(const std::vector<Ptr<BackendWrapper> > &inputs)
+    virtual Ptr<BackendNode> initHalide(const std::vector<Ptr<BackendWrapper> > &inputs) CV_OVERRIDE
     {
 #ifdef HAVE_HALIDE
         Halide::Buffer<float> inputBuffer = halideBuffer(inputs[0]);
@@ -284,8 +315,22 @@ public:
         return Ptr<BackendNode>();
     }
 
+    virtual Ptr<BackendNode> initInfEngine(const std::vector<Ptr<BackendWrapper> >&) CV_OVERRIDE
+    {
+#ifdef HAVE_INF_ENGINE
+        InferenceEngine::LayerParams lp;
+        lp.name = name;
+        lp.type = "SoftMax";
+        lp.precision = InferenceEngine::Precision::FP32;
+        std::shared_ptr<InferenceEngine::SoftMaxLayer> ieLayer(new InferenceEngine::SoftMaxLayer(lp));
+        ieLayer->axis = axisRaw;
+        return Ptr<BackendNode>(new InfEngineBackendNode(ieLayer));
+#endif  // HAVE_INF_ENGINE
+        return Ptr<BackendNode>();
+    }
+
     int64 getFLOPS(const std::vector<MatShape> &inputs,
-                  const std::vector<MatShape> &outputs) const
+                  const std::vector<MatShape> &outputs) const CV_OVERRIDE
     {
         (void)outputs; // suppress unused variable warning
         int64 flops = 0;

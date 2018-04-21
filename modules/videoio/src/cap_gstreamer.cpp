@@ -78,11 +78,8 @@
 #if GST_VERSION_MAJOR == 0
 #define COLOR_ELEM "ffmpegcolorspace"
 #define COLOR_ELEM_NAME "ffmpegcsp"
-#elif FULL_GST_VERSION < VERSION_NUM(1,5,0)
-#define COLOR_ELEM "videoconvert"
-#define COLOR_ELEM_NAME COLOR_ELEM
 #else
-#define COLOR_ELEM "autovideoconvert"
+#define COLOR_ELEM "videoconvert"
 #define COLOR_ELEM_NAME COLOR_ELEM
 #endif
 
@@ -133,7 +130,7 @@ private:
  * \brief The CvCapture_GStreamer class
  * Use GStreamer to capture video
  */
-class CvCapture_GStreamer : public CvCapture
+class CvCapture_GStreamer CV_FINAL : public CvCapture
 {
 public:
     CvCapture_GStreamer() { init(); }
@@ -142,10 +139,10 @@ public:
     virtual bool open( int type, const char* filename );
     virtual void close();
 
-    virtual double getProperty(int) const;
-    virtual bool setProperty(int, double);
-    virtual bool grabFrame();
-    virtual IplImage* retrieveFrame(int);
+    virtual double getProperty(int) const CV_OVERRIDE;
+    virtual bool setProperty(int, double) CV_OVERRIDE;
+    virtual bool grabFrame() CV_OVERRIDE;
+    virtual IplImage* retrieveFrame(int) CV_OVERRIDE;
 
 protected:
     void init();
@@ -178,6 +175,8 @@ protected:
     bool          isPosFramesSupported;
     bool          isPosFramesEmulated;
     gint64        emulatedFrameNumber;
+
+    bool          isOutputByteBuffer;
 };
 
 /*!
@@ -205,6 +204,8 @@ void CvCapture_GStreamer::init()
     isPosFramesSupported = false;
     isPosFramesEmulated = false;
     emulatedFrameNumber = -1;
+
+    isOutputByteBuffer = false;
 }
 
 /*!
@@ -279,7 +280,7 @@ bool CvCapture_GStreamer::grabFrame()
 /*!
  * \brief CvCapture_GStreamer::retrieveFrame
  * \return IplImage pointer. [Transfer Full]
- *  Retreive the previously grabbed buffer, and wrap it in an IPLImage structure
+ *  Retrieve the previously grabbed buffer, and wrap it in an IPLImage structure
  */
 IplImage * CvCapture_GStreamer::retrieveFrame(int)
 {
@@ -357,6 +358,7 @@ IplImage * CvCapture_GStreamer::retrieveFrame(int)
         } else if(strcasecmp(name, "image/jpeg") == 0) {
             depth = 1;
             // the correct size will be set once the first frame arrives
+            isOutputByteBuffer = true;
         }
 #endif
         if (depth > 0) {
@@ -383,7 +385,8 @@ IplImage * CvCapture_GStreamer::retrieveFrame(int)
     gboolean success = gst_buffer_map(buffer,&info, (GstMapFlags)GST_MAP_READ);
 
     // with MJPEG streams frame size can change arbitrarily
-    if(int(info.size) != frame->imageSize) {
+    if (isOutputByteBuffer && (size_t)info.size != (size_t)frame->imageSize)
+    {
         cvReleaseImageHeader(&frame);
         frame = cvCreateImageHeader(cvSize(info.size, 1), IPL_DEPTH_8U, 1);
     }
@@ -919,7 +922,7 @@ bool CvCapture_GStreamer::open( int type, const char* filename )
 
         if (!gst_structure_get_int (structure, "height", &height))
         {
-            CV_WARN("Cannot query video heigth\n");
+            CV_WARN("Cannot query video height\n");
         }
 
         gint num = 0, denom=1;
@@ -964,11 +967,11 @@ bool CvCapture_GStreamer::open( int type, const char* filename )
 }
 
 /*!
- * \brief CvCapture_GStreamer::getProperty retreive the requested property from the pipeline
+ * \brief CvCapture_GStreamer::getProperty retrieve the requested property from the pipeline
  * \param propId requested property
  * \return property value
  *
- * There are two ways the properties can be retreived. For seek-based properties we can query the pipeline.
+ * There are two ways the properties can be retrieved. For seek-based properties we can query the pipeline.
  * For frame-based properties, we use the caps of the lasst receivef sample. This means that some properties
  * are not available until a first frame was received
  */
@@ -1259,12 +1262,12 @@ class CvVideoWriter_GStreamer : public CvVideoWriter
 {
 public:
     CvVideoWriter_GStreamer() { init(); }
-    virtual ~CvVideoWriter_GStreamer() { close(); }
+    virtual ~CvVideoWriter_GStreamer() CV_OVERRIDE { close(); }
 
     virtual bool open( const char* filename, int fourcc,
                        double fps, CvSize frameSize, bool isColor );
     virtual void close();
-    virtual bool writeFrame( const IplImage* image );
+    virtual bool writeFrame( const IplImage* image ) CV_OVERRIDE;
 protected:
     void init();
     const char* filenameToMimetype(const char* filename);
